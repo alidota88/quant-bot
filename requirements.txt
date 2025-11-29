@@ -1,5 +1,5 @@
 tushare
-pandas
+pandas==1.5.3
 numpy
 requests
 pyTelegramBotAPI
