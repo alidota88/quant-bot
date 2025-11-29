@@ -5,68 +5,97 @@ from config import Config
 from data_manager import DataManager
 from strategy import StrategyAnalyzer
 
-# 初始化 Bot
+# 1. 初始化 Bot
 bot = telebot.TeleBot(Config.TG_BOT_TOKEN)
 
-# 初始化数据和策略模块
+# 2. 初始化数据与策略模块
+# DataManager 内部会自动初始化 DBManager
 dm = DataManager()
 strategy = StrategyAnalyzer(dm)
 
+# ================== 权限验证 ==================
 def is_authorized(message):
-    """安全检查: 防止陌生人调用你的机器人"""
+    """防止陌生人调用"""
     if str(message.chat.id) != Config.TG_CHAT_ID:
         bot.reply_to(message, "⛔️ 你没有权限使用此机器人。")
         return False
     return True
 
-# ================== 指令 1: /start ==================
+# ================== 指令: /start & /help ==================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     if not is_authorized(message): return
     
     msg = (
-        "🤖 **量化交互机器人已就绪**\n\n"
-        "👇你可以发送以下指令：\n\n"
-        "1️⃣ `/scan`\n"
-        "   > 立即扫描今日主线板块，寻找符合模型的股票。\n\n"
-        "2️⃣ `/check 600519.SH`\n"
-        "   > 强制按模型诊断某只具体股票。\n"
+        "🤖 **量化私有云 (Plan B)**\n\n"
+        "👇 常用指令：\n\n"
+        "🔄 `/update`\n"
+        "   > **同步数据**。收盘后点一次，下载当日数据到云硬盘。\n"
+        "   > 首次运行需下载60天数据，约需2-3分钟。\n\n"
+        "🚀 `/scan`\n"
+        "   > **极速选股**。从本地数据库扫描，秒出结果。\n\n"
+        "🔍 `/check 600519.SH`\n"
+        "   > **单股诊断**。实时联网检查某只股票。\n"
     )
     bot.reply_to(message, msg, parse_mode='Markdown')
 
-# ================== 指令 2: /scan (立即选股) ==================
+# ================== 指令: /update (数据同步) ==================
+@bot.message_handler(commands=['update'])
+def handle_update(message):
+    if not is_authorized(message): return
+
+    bot.reply_to(message, "🔄 正在同步 Tushare 数据到 Railway 云硬盘...\n(首次运行可能需要几分钟，请耐心等待)")
+    
+    try:
+        # 调用 DataManager 的同步逻辑
+        dm.sync_data(lookback_days=Config.BOX_DAYS + 10)
+        
+        # 获取最新数据日期
+        latest_date = dm.db.check_latest_date('daily_price')
+        
+        bot.reply_to(message, f"✅ **同步完成！**\n\n📅 数据库最新日期: `{latest_date}`\n现在可以使用 `/scan` 秒级选股了。", parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ 同步失败: {e}")
+
+# ================== 指令: /scan (本地极速扫描) ==================
 @bot.message_handler(commands=['scan'])
 def handle_scan(message):
     if not is_authorized(message): return
 
-    bot.reply_to(message, "⏳ 正在扫描主线板块与全市场，请稍候 (约需 1-2 分钟)...")
+    bot.reply_to(message, "⏳ 正在分析本地数据库...")
     
     try:
-        # 执行策略
+        # 执行策略 (读取本地 DB)
         results = strategy.run_daily_scan()
         today = datetime.now().strftime('%Y-%m-%d')
         
         if not results:
-            bot.send_message(message.chat.id, f"📅 {today}\n\n扫描完成，今日无符合【严格条件】的标的。")
+            bot.send_message(message.chat.id, f"📅 {today}\n\n本地库扫描完成，无符合条件的标的。\n\n(提示：如果今天刚收盘，请先执行 `/update`)")
         else:
-            msg = f"🚀 **{today} 实时扫描结果**\n"
+            msg = f"🚀 **{today} 选股结果**\n"
             msg += f"🔥 发现 {len(results)} 只符合条件的股票：\n\n"
             
-            for s in results[:10]:
+            for s in results[:10]: # 限制只发前10个
+                # 修复 Markdown 格式：把乘号 * 改为 x，避免报错
                 msg += f"🐂 **{s['name']}** (`{s['ts_code']}`)\n"
                 msg += f"   📂 板块: {s['sector']}\n"
-                msg += f"   💰 现价: {s['price']} ({s['pct_chg']}%)\n"
-                msg += f"   📊 评分: {s['score']}\n"
+                msg += f"   💰 现价: `{s['price']}`\n"
+                msg += f"   📊 评分: `{s['score']}`\n"
                 msg += f"   📝 理由: {s['reason']}\n\n"
             
             bot.send_message(message.chat.id, msg, parse_mode='Markdown')
             
     except Exception as e:
-        bot.reply_to(message, f"❌ 运行出错: {str(e)}")
+        bot.reply_to(message, f"❌ 扫描出错: {str(e)}")
 
-# ================== 指令 3: /check (单股诊断) ==================
+# ================== 指令: /check (实时联网诊断) ==================
 @bot.message_handler(commands=['check'])
 def handle_check(message):
+    """
+    注意：为了保证诊断的准确性，/check 指令依然走实时网络请求，
+    而不是查数据库。这样即使你忘了 update 也能临时查票。
+    """
     if not is_authorized(message): return
 
     try:
@@ -78,58 +107,65 @@ def handle_check(message):
     except IndexError:
         return
 
-    # 发送一个临时消息，稍后修改它
-    msg_id = bot.reply_to(message, f"🔍 正在深度诊断 `{ts_code}` ...", parse_mode='Markdown')
+    msg_id = bot.reply_to(message, f"🔍 正在联网深度诊断 `{ts_code}` ...", parse_mode='Markdown')
 
     try:
-        # 1. 获取基本信息
+        # 1. 获取最新交易日
         trade_date = dm.get_trade_date()
-        benchmark_ret = dm.get_benchmark_return(trade_date)
         
-        # 2. 借用 strategy 里的 check_stock 方法
-        result = strategy.check_stock(ts_code, "手动诊断", benchmark_ret, trade_date)
+        # 2. 实时获取该股数据 (不走 DB)
+        df = dm.pro.daily(ts_code=ts_code, start_date='', end_date=trade_date, limit=Config.BOX_DAYS + 20)
         
-        # 3. 获取股票名称
+        # 3. 获取名称
         try:
             base_info = dm.pro.stock_basic(ts_code=ts_code, fields='name')
-            if base_info.empty:
-                bot.edit_message_text(f"❌ 找不到代码 `{ts_code}`，请检查输入。", chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
-                return
-            name = base_info.iloc[0]['name']
+            name = base_info.iloc[0]['name'] if not base_info.empty else ts_code
         except:
             name = ts_code
 
-        if result:
-            # 符合模型 (注意：这里把 ** 改成了 *，这是 TG 标准加粗)
+        if df.empty or len(df) < Config.BOX_DAYS:
+            bot.edit_message_text(f"❌ 数据不足或代码错误 `{ts_code}`", chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
+            return
+
+        # 4. 现场计算 (简化版逻辑)
+        curr = df.iloc[0]
+        past = df.iloc[1:Config.BOX_DAYS+1]
+        
+        # 规则1: 箱体
+        box_high = past['high'].max()
+        is_breakout = curr['close'] > (box_high * Config.BREAKOUT_THRESHOLD)
+        
+        # 规则2: 放量
+        vol_ma20 = past['vol'].head(Config.VOL_MA_DAYS).mean()
+        is_vol_up = curr['vol'] > (vol_ma20 * Config.VOL_MULTIPLIER)
+
+        # 构造报告
+        if is_breakout and is_vol_up:
             res_txt = (
-                f"✅ *{name} ({ts_code}) 符合模型！*\n\n"
-                f"📊 评分: `{result['score']}`\n"
-                f"💰 现价: `{result['price']}`\n"
-                f"💡 理由: {result['reason']}\n"
-                f"🌊 资金: 连续3日净流入"
+                f"✅ **{name} ({ts_code}) 形态良好！**\n\n"
+                f"💰 现价: `{curr['close']}`\n"
+                f"📈 突破: 是 (箱体上沿 `{box_high}`)\n"
+                f"🌊 放量: 是 (量比 `{round(curr['vol']/vol_ma20, 1)}`)\n"
+                f"⚠️ *提示：请结合板块与资金流判断*"
             )
-            bot.edit_message_text(res_txt, chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
         else:
-            # 不符合模型 (注意：把 * 改成了 x，防止报错)
-            fail_txt = (
-                f"❌ *{name} ({ts_code}) 不符合筛选条件*\n\n"
-                f"可能原因：\n"
-                f"1. 未突破55日箱体\n"
-                f"2. 今日未放量 (需 > MA20 x 1.5)\n" 
-                f"3. 跑输沪深300指数\n"
-                f"4. 主力资金未连续3日净流入"
+            res_txt = (
+                f"❌ **{name} ({ts_code}) 不符合条件**\n\n"
+                f"1. 突破箱体: {'✅' if is_breakout else '❌'}\n"
+                f"   (现价 `{curr['close']}` vs 上沿 `{box_high}`)\n"
+                f"2. 有效放量: {'✅' if is_vol_up else '❌'}\n"
+                f"   (今日 `{curr['vol']}` vs 均量 `{int(vol_ma20)}`)"
             )
-            # 这里把 * 改成了 x 1.5，同时也修正了加粗语法
-            bot.edit_message_text(fail_txt, chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
+            
+        bot.edit_message_text(res_txt, chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
 
     except Exception as e:
-        # 如果出错，发送纯文本，不使用 Markdown，防止报错套报错
-        print(f"Error: {e}") # 打印到日志
         bot.edit_message_text(f"❌ 诊断出错: {str(e)}", chat_id=message.chat.id, message_id=msg_id.message_id)
 
+# ================== 启动主循环 ==================
 if __name__ == "__main__":
-    print("🤖 交互式机器人已启动，正在监听 Telegram 消息...")
-    # remove_webhook 确保从轮询模式开始，避免冲突
+    print("🤖 量化机器人 (Plan B) 已启动...")
+    # 移除 webhook 确保从轮询模式开始
     bot.remove_webhook()
-    # infinity_polling 让程序一直跑，即使网络闪断也会自动重连
+    # 开启长轮询
     bot.infinity_polling()
