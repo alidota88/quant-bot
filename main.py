@@ -69,14 +69,17 @@ def handle_scan(message):
 def handle_check(message):
     if not is_authorized(message): return
 
-    # 解析命令，例如 "/check 000001.SZ"
     try:
-        ts_code = message.text.split()[1].upper()
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ 格式错误，请使用: `/check 600519.SH`", parse_mode='Markdown')
+            return
+        ts_code = parts[1].upper()
     except IndexError:
-        bot.reply_to(message, "❌ 格式错误，请使用: `/check 600519.SH`")
         return
 
-    msg_id = bot.reply_to(message, f"🔍 正在深度诊断 {ts_code} ...")
+    # 发送一个临时消息，稍后修改它
+    msg_id = bot.reply_to(message, f"🔍 正在深度诊断 `{ts_code}` ...", parse_mode='Markdown')
 
     try:
         # 1. 获取基本信息
@@ -84,40 +87,44 @@ def handle_check(message):
         benchmark_ret = dm.get_benchmark_return(trade_date)
         
         # 2. 借用 strategy 里的 check_stock 方法
-        # 注意：这里我们随便传个 sector_name，因为是单股诊断，不重要
-        result = strategy.check_stock(ts_code, "手动指定", benchmark_ret, trade_date)
+        result = strategy.check_stock(ts_code, "手动诊断", benchmark_ret, trade_date)
         
         # 3. 获取股票名称
-        base_info = dm.pro.stock_basic(ts_code=ts_code, fields='name')
-        if base_info.empty:
-            bot.edit_message_text(f"❌ 找不到代码 {ts_code}，请检查是否输入正确。", chat_id=message.chat.id, message_id=msg_id.message_id)
-            return
-        name = base_info.iloc[0]['name']
+        try:
+            base_info = dm.pro.stock_basic(ts_code=ts_code, fields='name')
+            if base_info.empty:
+                bot.edit_message_text(f"❌ 找不到代码 `{ts_code}`，请检查输入。", chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
+                return
+            name = base_info.iloc[0]['name']
+        except:
+            name = ts_code
 
         if result:
-            # 符合模型
+            # 符合模型 (注意：这里把 ** 改成了 *，这是 TG 标准加粗)
             res_txt = (
-                f"✅ **{name} ({ts_code}) 符合模型！**\n\n"
-                f"📊 评分: {result['score']}\n"
-                f"💰 现价: {result['price']}\n"
+                f"✅ *{name} ({ts_code}) 符合模型！*\n\n"
+                f"📊 评分: `{result['score']}`\n"
+                f"💰 现价: `{result['price']}`\n"
                 f"💡 理由: {result['reason']}\n"
                 f"🌊 资金: 连续3日净流入"
             )
             bot.edit_message_text(res_txt, chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
         else:
-            # 不符合模型，给出原因（这里需要 DataManager 配合查具体原因，为简单起见，直接告知不符合）
-            # 实际上如果不符合，result 是 None
+            # 不符合模型 (注意：把 * 改成了 x，防止报错)
             fail_txt = (
-                f"❌ **{name} ({ts_code}) 不符合筛选条件**\n\n"
+                f"❌ *{name} ({ts_code}) 不符合筛选条件*\n\n"
                 f"可能原因：\n"
                 f"1. 未突破55日箱体\n"
-                f"2. 今日未放量 (需 > MA20 * 1.5)\n"
+                f"2. 今日未放量 (需 > MA20 x 1.5)\n" 
                 f"3. 跑输沪深300指数\n"
                 f"4. 主力资金未连续3日净流入"
             )
+            # 这里把 * 改成了 x 1.5，同时也修正了加粗语法
             bot.edit_message_text(fail_txt, chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
 
     except Exception as e:
+        # 如果出错，发送纯文本，不使用 Markdown，防止报错套报错
+        print(f"Error: {e}") # 打印到日志
         bot.edit_message_text(f"❌ 诊断出错: {str(e)}", chat_id=message.chat.id, message_id=msg_id.message_id)
 
 if __name__ == "__main__":
