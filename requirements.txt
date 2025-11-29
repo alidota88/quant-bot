@@ -2,4 +2,4 @@ tushare
 pandas
 numpy
 requests
-schedule
+pyTelegramBotAPI
