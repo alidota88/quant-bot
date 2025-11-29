@@ -1,37 +1,128 @@
-import schedule
+import telebot
 import time
+from datetime import datetime
+from config import Config
 from data_manager import DataManager
 from strategy import StrategyAnalyzer
-from notification import TelegramBot
-from datetime import datetime
 
-def job():
-    print(f"⏰ 定时任务启动 - {datetime.now()}")
-    
-    # 初始化各个模块
-    dm = DataManager()
-    strategy = StrategyAnalyzer(dm)
-    bot = TelegramBot()
+# 初始化 Bot
+bot = telebot.TeleBot(Config.TG_BOT_TOKEN)
 
-    # 执行策略
-    selected_stocks = strategy.run_daily_scan()
+# 初始化数据和策略模块
+dm = DataManager()
+strategy = StrategyAnalyzer(dm)
+
+def is_authorized(message):
+    """安全检查: 防止陌生人调用你的机器人"""
+    if str(message.chat.id) != Config.TG_CHAT_ID:
+        bot.reply_to(message, "⛔️ 你没有权限使用此机器人。")
+        return False
+    return True
+
+# ================== 指令 1: /start ==================
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    if not is_authorized(message): return
     
-    # 发送通知
-    today = datetime.now().strftime('%Y-%m-%d')
-    bot.send_report(selected_stocks, today)
-    print("✅ 任务完成")
+    msg = (
+        "🤖 **量化交互机器人已就绪**\n\n"
+        "👇你可以发送以下指令：\n\n"
+        "1️⃣ `/scan`\n"
+        "   > 立即扫描今日主线板块，寻找符合模型的股票。\n\n"
+        "2️⃣ `/check 600519.SH`\n"
+        "   > 强制按模型诊断某只具体股票。\n"
+    )
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+# ================== 指令 2: /scan (立即选股) ==================
+@bot.message_handler(commands=['scan'])
+def handle_scan(message):
+    if not is_authorized(message): return
+
+    bot.reply_to(message, "⏳ 正在扫描主线板块与全市场，请稍候 (约需 1-2 分钟)...")
+    
+    try:
+        # 执行策略
+        results = strategy.run_daily_scan()
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        if not results:
+            bot.send_message(message.chat.id, f"📅 {today}\n\n扫描完成，今日无符合【严格条件】的标的。")
+        else:
+            msg = f"🚀 **{today} 实时扫描结果**\n"
+            msg += f"🔥 发现 {len(results)} 只符合条件的股票：\n\n"
+            
+            for s in results[:10]:
+                msg += f"🐂 **{s['name']}** (`{s['ts_code']}`)\n"
+                msg += f"   📂 板块: {s['sector']}\n"
+                msg += f"   💰 现价: {s['price']} ({s['pct_chg']}%)\n"
+                msg += f"   📊 评分: {s['score']}\n"
+                msg += f"   📝 理由: {s['reason']}\n\n"
+            
+            bot.send_message(message.chat.id, msg, parse_mode='Markdown')
+            
+    except Exception as e:
+        bot.reply_to(message, f"❌ 运行出错: {str(e)}")
+
+# ================== 指令 3: /check (单股诊断) ==================
+@bot.message_handler(commands=['check'])
+def handle_check(message):
+    if not is_authorized(message): return
+
+    # 解析命令，例如 "/check 000001.SZ"
+    try:
+        ts_code = message.text.split()[1].upper()
+    except IndexError:
+        bot.reply_to(message, "❌ 格式错误，请使用: `/check 600519.SH`")
+        return
+
+    msg_id = bot.reply_to(message, f"🔍 正在深度诊断 {ts_code} ...")
+
+    try:
+        # 1. 获取基本信息
+        trade_date = dm.get_trade_date()
+        benchmark_ret = dm.get_benchmark_return(trade_date)
+        
+        # 2. 借用 strategy 里的 check_stock 方法
+        # 注意：这里我们随便传个 sector_name，因为是单股诊断，不重要
+        result = strategy.check_stock(ts_code, "手动指定", benchmark_ret, trade_date)
+        
+        # 3. 获取股票名称
+        base_info = dm.pro.stock_basic(ts_code=ts_code, fields='name')
+        if base_info.empty:
+            bot.edit_message_text(f"❌ 找不到代码 {ts_code}，请检查是否输入正确。", chat_id=message.chat.id, message_id=msg_id.message_id)
+            return
+        name = base_info.iloc[0]['name']
+
+        if result:
+            # 符合模型
+            res_txt = (
+                f"✅ **{name} ({ts_code}) 符合模型！**\n\n"
+                f"📊 评分: {result['score']}\n"
+                f"💰 现价: {result['price']}\n"
+                f"💡 理由: {result['reason']}\n"
+                f"🌊 资金: 连续3日净流入"
+            )
+            bot.edit_message_text(res_txt, chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
+        else:
+            # 不符合模型，给出原因（这里需要 DataManager 配合查具体原因，为简单起见，直接告知不符合）
+            # 实际上如果不符合，result 是 None
+            fail_txt = (
+                f"❌ **{name} ({ts_code}) 不符合筛选条件**\n\n"
+                f"可能原因：\n"
+                f"1. 未突破55日箱体\n"
+                f"2. 今日未放量 (需 > MA20 * 1.5)\n"
+                f"3. 跑输沪深300指数\n"
+                f"4. 主力资金未连续3日净流入"
+            )
+            bot.edit_message_text(fail_txt, chat_id=message.chat.id, message_id=msg_id.message_id, parse_mode='Markdown')
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ 诊断出错: {str(e)}", chat_id=message.chat.id, message_id=msg_id.message_id)
 
 if __name__ == "__main__":
-    # Railway 部署逻辑
-    # 注意：Railway 默认为 UTC 时间
-    # UTC 07:30 = 北京时间 15:30 (收盘后)
-    schedule.every().day.at("07:30").do(job)
-    
-    print("🤖 量化机器人已启动，等待执行...")
-    
-    # 首次启动如果有必要，可以取消下面这行的注释进行一次立即测试
-    # job()
-
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    print("🤖 交互式机器人已启动，正在监听 Telegram 消息...")
+    # remove_webhook 确保从轮询模式开始，避免冲突
+    bot.remove_webhook()
+    # infinity_polling 让程序一直跑，即使网络闪断也会自动重连
+    bot.infinity_polling()
