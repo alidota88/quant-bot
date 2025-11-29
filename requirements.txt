@@ -1,0 +1,5 @@
+tushare
+pandas
+numpy
+requests
+schedule
