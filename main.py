@@ -81,36 +81,36 @@ def handle_info(message):
         bot.reply_to(message, f"❌ 查询失败(可能是空库): {e}")
 
 # ================== 数据同步: /update ==================
+# 在 main.py 中找到这个函数并替换
 @bot.message_handler(commands=['update'])
 def handle_update(message):
     if not is_authorized(message): return
-    bot.reply_to(message, "🔄 开始同步... (请耐心等待约 2 分钟)")
-    try:
-        dm.sync_data(lookback_days=Config.BOX_DAYS + 10) # 下载最近65天
-        latest = dm.db.check_latest_date('daily_price')
-        bot.reply_to(message, f"✅ **同步完成！**\n数据库最新日期: `{latest}`\n快去试试 `/scan` 吧！", parse_mode='Markdown')
-    except Exception as e:
-        bot.reply_to(message, f"❌ 同步出错: {e}")
 
-# ================== 选股: /scan ==================
-@bot.message_handler(commands=['scan'])
-def handle_scan(message):
-    if not is_authorized(message): return
-    bot.reply_to(message, "⏳ 正在分析本地数据...")
+    bot.reply_to(message, "🔄 开始同步... (已开启网络增强模式，超时设置为120秒)")
+    
     try:
-        results = strategy.run_daily_scan()
-        if not results:
-            bot.send_message(message.chat.id, "📅 本地库扫描完成，今日无符合条件的标的。\n(如果数据没更新，请先 /update)")
+        # 接收三个返回值
+        success, fail, err = dm.sync_data(lookback_days=Config.BOX_DAYS + 10)
+        
+        # 获取最新日期
+        latest_date = dm.db.check_latest_date('daily_price')
+        
+        # 构造详细报告
+        msg = f"✅ **同步流程结束**\n\n"
+        msg += f"📅 数据库最新日期: `{latest_date}`\n"
+        msg += f"📥 成功下载: `{success}` 天\n"
+        
+        if fail > 0:
+             msg += f"❌ **失败天数**: `{fail}` 天\n"
+             msg += f"⚠️ 错误原因: `{err}`\n"
+             msg += "建议：请稍后再次执行 `/update` 补全缺失数据。"
         else:
-            msg = f"🚀 **{datetime.now().strftime('%Y-%m-%d')} 选股结果**\n\n"
-            for s in results[:10]:
-                msg += f"🐂 **{s['name']}** (`{s['ts_code']}`)\n"
-                msg += f"   板块: {s['sector']}\n"
-                msg += f"   现价: `{s['price']}`\n"
-                msg += f"   理由: {s['reason']}\n\n"
-            bot.send_message(message.chat.id, msg, parse_mode='Markdown')
+             msg += "🎉 所有数据已是最新！\n快去试试 `/scan` 吧！"
+
+        bot.reply_to(message, msg, parse_mode='Markdown')
+        
     except Exception as e:
-        bot.reply_to(message, f"❌ 扫描失败: {str(e)}")
+        bot.reply_to(message, f"❌ 严重错误: {e}")
 
 # ================== 诊断: /check ==================
 @bot.message_handler(commands=['check'])
