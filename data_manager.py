@@ -7,95 +7,96 @@ from db_manager import DBManager
 
 class DataManager:
     def __init__(self):
-        # 初始化 Tushare
         ts.set_token(Config.TUSHARE_TOKEN)
-        self.pro = ts.pro_api()
-        # 初始化数据库连接
+        # ==================== 👇 关键修改 1 👇 ====================
+        # 设置 120秒 超时，防止网络波动导致 Read timed out
+        self.pro = ts.pro_api(timeout=120) 
+        # =========================================================
         self.db = DBManager()
 
     def get_trade_date(self):
         """获取最近一个交易日"""
         today = datetime.now().strftime('%Y%m%d')
-        # 获取最近两周的交易日历，防止长假期间取不到数据
+        # 获取最近两周的交易日历
         df = self.pro.trade_cal(exchange='', start_date=(datetime.now() - timedelta(days=15)).strftime('%Y%m%d'), end_date=today, is_open='1')
         return df['cal_date'].values[-1]
 
     def sync_data(self, lookback_days=60):
         """
-        核心函数：同步数据到本地数据库
+        同步数据，并返回同步结果报告
+        Returns: (success_count, fail_count, error_msg)
         """
         print("🔄 正在检查数据同步状态...")
         
-        # 1. 确定时间范围
         end_date = self.get_trade_date()
         latest_in_db = self.db.check_latest_date('daily_price')
         
+        # 确定下载范围
         if latest_in_db is None:
-            # === 关键修正 ===
-            # 只有数据库彻底为空时，才回溯 60 天
             start_date = (pd.to_datetime(end_date) - timedelta(days=lookback_days)).strftime('%Y%m%d')
-            print(f"⚡️ 首次初始化，下载范围: {start_date} -> {end_date}")
+            print(f"⚡️ 首次初始化: {start_date} -> {end_date}")
         elif latest_in_db < end_date:
-            # 增量更新：从数据库最新日期的下一天开始
             start_date = (pd.to_datetime(latest_in_db) + timedelta(days=1)).strftime('%Y%m%d')
-            print(f"📈 增量更新，下载范围: {start_date} -> {end_date}")
+            print(f"📈 增量更新: {start_date} -> {end_date}")
         else:
-            print("✅ 数据已是最新，无需更新。")
-            return
+            return 0, 0, "数据已是最新"
 
-        # 2. 获取期间的所有交易日
+        # 获取交易日
         cal = self.pro.trade_cal(exchange='', start_date=start_date, end_date=end_date, is_open='1')
         trade_dates = cal['cal_date'].tolist()
 
         if not trade_dates:
-            print("✅ 没有新的交易日需要更新。")
-            return
+            return 0, 0, "无新交易日"
 
-        # 3. 循环下载并入库
+        success_count = 0
+        fail_count = 0
+        last_error = ""
+
+        # ==================== 👇 关键修改 2 👇 ====================
+        # 增加失败重试机制
         for date in trade_dates:
-            print(f"📥 正在下载: {date} ...")
-            try:
-                # A. 下载全市场日线
-                df_daily = self.pro.daily(trade_date=date)
-                self.db.save_data(df_daily, 'daily_price')
-                
-                # B. 下载全市场资金流 (高级接口)
-                df_flow = self.pro.moneyflow(trade_date=date)
-                self.db.save_data(df_flow, 'money_flow')
-                
-                # === 关键修正: 增加延时防止封锁 ===
-                # 每次请求后暂停 0.8 秒，确保每分钟请求数在 Tushare 限制内
-                time.sleep(0.8) 
-                
-            except Exception as e:
-                print(f"❌ 同步 {date} 失败: {e}")
+            print(f"📥 下载: {date} ...")
+            retry_times = 2 # 失败允许重试2次
+            
+            for i in range(retry_times):
+                try:
+                    # A. 日线
+                    df_daily = self.pro.daily(trade_date=date)
+                    self.db.save_data(df_daily, 'daily_price')
+                    
+                    # B. 资金流
+                    df_flow = self.pro.moneyflow(trade_date=date)
+                    self.db.save_data(df_flow, 'money_flow')
+                    
+                    # 成功！
+                    success_count += 1
+                    time.sleep(0.8) # 稍微休息
+                    break # 跳出重试循环
+                    
+                except Exception as e:
+                    print(f"⚠️ {date} 第{i+1}次失败: {e}")
+                    if i == retry_times - 1: # 最后一次也没成功
+                        fail_count += 1
+                        last_error = str(e)
+                    else:
+                        time.sleep(3) # 失败后多休息几秒再试
 
-        # 4. 最后更新基础信息表 (覆盖旧的)
-        print("📥 更新股票基础列表...")
-        try:
-            df_basic = self.pro.stock_basic(exchange='', list_status='L', fields='ts_code,symbol,name,industry,market')
-            self.db.save_data(df_basic, 'stock_basic', if_exists='replace')
-        except Exception as e:
-            print(f"❌ 股票列表更新失败: {e}")
-        
-        print("🎉 数据同步完成！")
+        return success_count, fail_count, last_error
+        # =========================================================
 
-    # ============ 数据读取接口 (供策略使用) ============
+    # ============ 下面的代码保持不变 ============
 
     def get_history_from_db(self, days=60):
-        """从数据库读取最近N天的日线"""
         start_date = (datetime.now() - timedelta(days=days*2)).strftime('%Y%m%d')
         return self.db.get_data('daily_price', start_date=start_date)
 
     def get_moneyflow_from_db(self, days=10):
-        """从数据库读取最近N天的资金流"""
         start_date = (datetime.now() - timedelta(days=days*2)).strftime('%Y%m%d')
         return self.db.get_data('money_flow', start_date=start_date)
     
     def get_stock_basics(self):
         return self.db.get_data('stock_basic')
 
-    # 主线板块依然走实时请求 (数据量小，且需最新排名)
     def get_top_sectors(self, trade_date):
         try:
             sw_index = self.pro.index_classify(level='L1', src='SW2021')
@@ -109,7 +110,6 @@ class DataManager:
         return self.pro.index_member(index_code=sector_code)['con_code'].tolist()
         
     def get_benchmark_return(self, end_date, days=20):
-        # 实时请求大盘指数
         start_date = (pd.to_datetime(end_date) - timedelta(days=days*2)).strftime('%Y%m%d')
         df = self.pro.index_daily(ts_code=Config.RS_BENCHMARK, start_date=start_date, end_date=end_date)
         if len(df) < days: return 0
