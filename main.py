@@ -112,6 +112,33 @@ def handle_update(message):
     except Exception as e:
         bot.reply_to(message, f"❌ 严重错误: {e}")
 
+# ================== 选股: /scan (这里补回来了！) ==================
+@bot.message_handler(commands=['scan'])
+def handle_scan(message):
+    if not is_authorized(message): return
+    
+    # 1. 马上回复，证明Bot活着
+    bot.reply_to(message, "⏳ 正在分析数据库，请稍候...")
+    
+    try:
+        # 执行策略
+        results = strategy.run_daily_scan()
+        
+        if not results:
+            bot.send_message(message.chat.id, "📅 扫描完成，今日无符合模型的标的。")
+        else:
+            msg = f"🚀 **选股结果** ({len(results)}只)\n\n"
+            # 只发前10个，防止消息过长发送失败
+            for s in results[:10]:
+                msg += f"🐂 **{s['name']}** (`{s['ts_code']}`)\n"
+                msg += f"   现价: `{s['price']}`\n"
+                msg += f"   理由: {s['reason']}\n\n"
+            bot.send_message(message.chat.id, msg, parse_mode='Markdown')
+            
+    except Exception as e:
+        # 捕捉所有错误并发送，而不是沉默
+        bot.send_message(message.chat.id, f"❌ 扫描过程崩溃: {str(e)}")
+        
 # ================== 诊断: /check ==================
 @bot.message_handler(commands=['check'])
 def handle_check(message):
