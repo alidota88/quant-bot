@@ -181,23 +181,9 @@ def handle_check(message):
         bot.send_message(message.chat.id, f"Error: {e}")
 
 if __name__ == "__main__":
-    import time
-    from requests.exceptions import ReadTimeout, ConnectionError
-
     bot.remove_webhook()
-
-    while True:
-        try:
-            print("🤖 Telegram bot started (safe polling)...")
-            bot.infinity_polling(
-                timeout=10,
-                long_polling_timeout=5,
-                skip_pending=True
-            )
-        except (ReadTimeout, ConnectionError) as e:
-            print(f"⚠️ Telegram 网络异常: {e}，5 秒后重试")
-            time.sleep(5)
-        except Exception as e:
-            print(f"🔥 未知异常: {e}，10 秒后重启 polling")
-            time.sleep(10)
-
+    bot.infinity_polling(
+        timeout=60,              # requests 超时时间调到 60 秒
+        long_polling_timeout=30, # Telegram 长轮询保持时间调到 30 秒
+        allowed_updates=["message"]  # 只监听消息，减少不必要的数据
+    )
