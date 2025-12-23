@@ -2,6 +2,8 @@
 import os
 import time
 import telebot
+import threading
+from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from sqlalchemy import text
 from config import Config
@@ -16,12 +18,14 @@ bot = telebot.TeleBot(Config.TG_BOT_TOKEN)
 dm = DataManager()
 strategy = StrategyAnalyzer(dm)
 
+
 def is_authorized(message):
     """只允许配置的 chat_id 使用"""
     if str(message.chat.id) != Config.TG_CHAT_ID:
         bot.reply_to(message, "⛔️ 无权访问")
         return False
     return True
+
 
 # ==================== 命令处理 ====================
 
@@ -42,6 +46,7 @@ def send_welcome(message):
     )
     bot.reply_to(message, msg, parse_mode='Markdown')
 
+
 @bot.message_handler(commands=['reset'])
 def handle_reset(message):
     if not is_authorized(message):
@@ -53,7 +58,7 @@ def handle_reset(message):
     try:
         if os.path.exists(db_path):
             os.remove(db_path)
-            bot.send_message(message.chat.id, "🗑️ 旧数据库文件已删除。")  # 修复：添加结束引号
+            bot.send_message(message.chat.id, "🗑️ 旧数据库文件已删除。")
         
         global dm, strategy
         dm = DataManager()
@@ -65,7 +70,8 @@ def handle_reset(message):
     except Exception as e:
         bot.reply_to(message, f"❌ 重置失败: {e}")
 
-@bot.message_handler(commands=['info'])  # 修复：添加 @
+
+@bot.message_handler(commands=['info'])
 def handle_info(message):
     if not is_authorized(message):
         return
@@ -88,13 +94,14 @@ def handle_info(message):
     except Exception as e:
         bot.reply_to(message, f"❌ 查询失败(可能是空库): {e}")
 
-@bot.message_handler(commands=['update'])  # 修复：添加 @
+
+@bot.message_handler(commands=['update'])
 def handle_update(message):
     if not is_authorized(message):
         return
     
-    bot.reply_to(message, "✅ 已收到 /update 命令，正在后台同步数据（预计2-5分钟）...")  # 新增：即时确认
-    print("🔄 用户触发 /update，开始同步数据...")  # 新增：日志打印
+    bot.reply_to(message, "✅ 已收到 /update 命令，正在后台同步数据（预计2-5分钟）...")
+    print("🔄 用户手动触发 /update，开始同步数据...")
     
     try:
         success, fail, err = dm.sync_data(lookback_days=Config.BOX_DAYS + 10)
@@ -112,19 +119,20 @@ def handle_update(message):
             msg += "🎉 所有数据已是最新！\n快去试试 `/scan` 吧！"
 
         bot.reply_to(message, msg, parse_mode='Markdown')
-        print(f"✅ /update 完成: 成功 {success} 天, 失败 {fail} 天")  # 新增：日志
+        print(f"✅ 用户 /update 完成: 成功 {success} 天, 失败 {fail} 天")
         
     except Exception as e:
         bot.reply_to(message, f"❌ 严重错误: {e}")
-        print(f"❌ /update 异常: {e}")  # 新增：日志
+        print(f"❌ 用户 /update 异常: {e}")
 
-@bot.message_handler(commands=['scan'])  # 修复：添加 @
+
+@bot.message_handler(commands=['scan'])
 def handle_scan(message):
     if not is_authorized(message):
         return
     
-    bot.reply_to(message, "✅ 已收到 /scan 命令，正在分析最新数据，请稍候...")  # 新增：即时确认
-    print("🚀 用户触发 /scan，开始策略分析...")  # 新增：日志打印
+    bot.reply_to(message, "✅ 已收到 /scan 命令，正在分析最新数据，请稍候...")
+    print("🚀 用户手动触发 /scan，开始策略分析...")
     
     try:
         results = strategy.run_daily_scan()
@@ -133,20 +141,20 @@ def handle_scan(message):
             bot.send_message(message.chat.id, "📅 扫描完成，今日无符合模型的标的。")
         else:
             msg = f"🚀 **选股结果** ({len(results)}只)\n\n"
-            # 只发前10个，防止消息过长发送失败
             for s in results[:10]:
                 msg += f"🐂 **{s['name']}** (`{s['ts_code']}`)\n"
                 msg += f"   现价: `{s['price']}`\n"
                 msg += f"   理由: {s['reason']}\n\n"
             bot.send_message(message.chat.id, msg, parse_mode='Markdown')
         
-        print(f"🏁 /scan 完成，最终选中 {len(results)} 只")  # 新增：日志
+        print(f"🏁 用户 /scan 完成，最终选中 {len(results)} 只")
         
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ 扫描过程崩溃: {str(e)}")
-        print(f"❌ /scan 异常: {e}")  # 新增：日志
+        print(f"❌ 用户 /scan 异常: {e}")
 
-@bot.message_handler(commands=['check'])  # 修复：添加 @
+
+@bot.message_handler(commands=['check'])
 def handle_check(message):
     if not is_authorized(message):
         return
@@ -188,42 +196,111 @@ def handle_check(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"Error: {e}")
 
+
+# ==================== 自动每日任务（下载数据 + 选股 + 推送） ====================
+
+def daily_auto_task():
+    """每天下午17:00自动执行：更新数据 → 选股 → 推送报告"""
+    def get_next_run_time():
+        now = datetime.now()
+        next_run = now.replace(hour=17, minute=0, second=0, microsecond=0)
+        if now >= next_run:
+            next_run += timedelta(days=1)
+        return next_run
+
+    while True:
+        next_run = get_next_run_time()
+        sleep_seconds = (next_run - datetime.now()).total_seconds()
+        
+        print(f"⏰ 下次自动任务时间: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (距今约 {int(sleep_seconds//60)} 分钟)")
+        time.sleep(sleep_seconds)
+
+        try:
+            today_str = datetime.now().strftime('%Y%m%d')
+            print(f"🕔 {today_str} 到达自动任务时间，开始执行...")
+
+            # 1. 检查是否为交易日
+            cal = dm.pro.trade_cal(exchange='', start_date=today_str, end_date=today_str)
+            if cal.empty or cal.iloc[0]['is_open'] == 0:
+                print(f"📅 {today_str} 非交易日，跳过本次自动任务")
+                continue
+
+            # 2. 自动更新数据
+            print("🔄 自动任务：开始更新最新数据...")
+            success, fail, err = dm.sync_data(lookback_days=Config.BOX_DAYS + 10)
+            latest_date = dm.db.check_latest_date('daily_price')
+            print(f"✅ 数据更新完成：最新日期 {latest_date}，成功 {success} 天，失败 {fail} 天")
+
+            # 3. 自动选股扫描
+            print("🚀 自动任务：开始选股扫描...")
+            results = strategy.run_daily_scan()
+            trade_date = dm.get_trade_date()
+
+            # 4. 构建并推送报告
+            if not results:
+                msg = f"📅 {trade_date} \n\n今日无符合【严格突破模型】的标的。\n保持观察，耐心等待主升浪！"
+            else:
+                msg = f"🚀 **量化选股日报** ({trade_date})\n"
+                msg += f"策略：突破箱体 + 机构主线 + 资金连买\n"
+                msg += f"共选中 {len(results)} 只优质标的\n"
+                msg += f"========================\n\n"
+
+                for s in results[:10]:
+                    msg += f"🔥 **{s['name']}** (`{s['ts_code']}`)\n"
+                    msg += f"   💰 现价: {s['price']} (涨幅 {s.get('pct_chg', 'N/A')}%)\n"
+                    msg += f"   💡 理由: {s['reason']}\n\n"
+
+                if len(results) > 10:
+                    msg += f"... 共 {len(results)} 只（更多请手动 /scan 查看）"
+
+            bot.send_message(Config.TG_CHAT_ID, msg, parse_mode='Markdown')
+            print(f"✅ 自动日报已推送（{len(results)} 只标的）")
+
+        except Exception as e:
+            print(f"❌ 自动任务执行出错: {e}")
+            try:
+                bot.send_message(Config.TG_CHAT_ID, f"⚠️ 自动任务出错：{str(e)}")
+            except:
+                pass
+
+
+# 启动后台线程执行自动任务
+threading.Thread(target=daily_auto_task, daemon=True).start()
+
+
 # ==================== Webhook 路由 ====================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """处理 Telegram 推送的更新"""
     if request.headers.get('content-type') == 'application/json':
-        json_data = request.get_json(force=True)  # 强制解析 JSON，避免空体问题
+        json_data = request.get_json(force=True)
         update = telebot.types.Update.de_json(json_data)
         if update:
-            bot.process_new_updates([update])  # 关键！触发所有 @bot.message_handler
-        return '', 200  # Telegram 要求返回 200 OK
+            bot.process_new_updates([update])
+        return '', 200
     else:
         abort(403)
+
 
 @app.route('/')
 def index():
     return "🤖 Quant Bot is running! Webhook 已就绪。"
 
+
 # ==================== 启动时设置 Webhook ====================
 
 if __name__ == "__main__":
-    # 先清除旧的 webhook
     bot.remove_webhook()
     time.sleep(1)
 
-    # 自动检测常见平台的公网域名
     domain = (
         os.getenv('RAILWAY_STATIC_URL') or
         os.getenv('RENDER_EXTERNAL_URL') or
         os.getenv('FLY_APP_NAME') + '.fly.dev' if os.getenv('FLY_APP_NAME') else None
     )
 
-    # 如果上面都没检测到，你可以直接手动写死（推荐第一次部署时这么做）
     if not domain:
-        # ↓↓↓ 请改成你自己的实际域名 ↓↓↓
-        domain = "quant-bot-production.up.railway.app"  # 示例：quant-bot.up.railway.app
+        domain = "quant-bot-production.up.railway.app"  # ← 请确认这是你的真实域名
 
     webhook_url = f"https://{domain.strip('/')}/webhook"
     print(f"正在设置 Webhook URL: {webhook_url}")
@@ -233,6 +310,5 @@ if __name__ == "__main__":
     else:
         print("❌ Webhook 设置失败，请检查域名是否正确、是否为 HTTPS")
 
-    # 启动 Flask 服务（平台会注入 PORT 环境变量）
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
