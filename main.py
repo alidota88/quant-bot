@@ -69,7 +69,7 @@ def handle_reset(message):
         bot.reply_to(message, f"❌ 重置失败: {e}")
 
 
-@bot.message_handler(commands=['info'])
+bot.message_handler(commands=['info'])
 def handle_info(message):
     if not is_authorized(message):
         return
@@ -92,7 +92,7 @@ def handle_info(message):
         bot.reply_to(message, f"❌ 查询失败(可能是空库): {e}")
 
 
-@bot.message_handler(commands=['update'])
+bot.message_handler(commands=['update'])
 def handle_update(message):
     if not is_authorized(message):
         return
@@ -120,7 +120,7 @@ def handle_update(message):
         bot.reply_to(message, f"❌ 严重错误: {e}")
 
 
-@bot.message_handler(commands=['scan'])
+bot.message_handler(commands=['scan'])
 def handle_scan(message):
     if not is_authorized(message):
         return
@@ -144,7 +144,7 @@ def handle_scan(message):
         bot.send_message(message.chat.id, f"❌ 扫描过程崩溃: {str(e)}")
 
 
-@bot.message_handler(commands=['check'])
+bot.message_handler(commands=['check'])
 def handle_check(message):
     if not is_authorized(message):
         return
@@ -190,12 +190,13 @@ def handle_check(message):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """接收 Telegram 推送的更新"""
+    """处理 Telegram 推送的更新"""
     if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return 'OK', 200
+        json_data = request.get_json(force=True)  # 强制解析 JSON，避免空体问题
+        update = telebot.types.Update.de_json(json_data)
+        if update:
+            bot.process_new_updates([update])  # 关键！触发所有 @bot.message_handler
+        return '', 200  # Telegram 要求返回 200 OK
     else:
         abort(403)
 
